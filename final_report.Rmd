@@ -1,0 +1,210 @@
+---
+title: "DataFest 2020 Twitter/News Analysis"
+author: "Jason Lim"
+date: "5/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Import general libraries
+```{r general libs}
+# library(tidyverse)
+library(magrittr)
+library(plyr)
+library(chron)
+```
+This chunk will get the data if it's not downloaded, or get new data.
+
+```{r get news data}
+library(httr)
+library(jsonlite)
+```
+
+## Data Gathering
+
+New age query functions to beat the 100 article limit
+
+Helper to get one day of news
+```{r}
+query_one <- function(terms_vec, day, search_mode="q") {
+  api_key <- readLines(file("api_key.txt"))
+  
+  search_terms <- paste0(search_mode, '=', paste(terms_vec, collapse = "+"))
+  from <- paste0('from=', day)
+  to <- paste0('to=', day)
+  api <- paste0('apiKey=', api_key)
+  
+  params <- paste(
+    search_terms,
+    from,
+    to,
+    'sortBy=popularity',
+    'language=en',
+    'pageSize=100',
+    api,
+    sep = "&"
+  )
+  
+  url <-
+    paste0('http://newsapi.org/v2/everything?',
+           params)
+  
+  httr::GET(url) %>%
+    content(as = "text") %>%
+    jsonlite::fromJSON() %>% 
+    `row.names<-`(value = NULL)
+}
+```
+
+Helper to make a vector of dates to get
+```{r}
+create_date_range <- function(from, to) {
+  difference <-
+    chron(to, format = "y/m/d") - chron(from, format = "y/m/d") + 1
+  (seq_len(difference) - 1 + chron(from, format = "y/m/d")) %>%
+    format(format = "y-m-d")
+}
+```
+
+
+```{r test range func, include=FALSE}
+create_date_range('2020/04/25', '2020/05/08')
+create_date_range(from = '2020/4/13', to = '2020/4/15')
+create_date_range(from = '2020/4/29', to = '2020/5/1')
+test_range <- create_date_range('2020/04/25', '2020/05/08')
+query_one(c("potato"), test_range[1])
+```
+
+The real function
+```{r}
+query_news <- function(terms_vec, from, to, ...) {
+  date_range <- paste0("20", create_date_range(from, to))
+  # sort of janky to save time
+  article_list <- lapply(date_range, function(day) {
+    response <- query_one(terms_vec = terms_vec, day = day, ...)
+    response$articles
+  })
+  # Weird errors prevent a nice vectorized solution here
+  out <- data.frame()
+  for (element in article_list) {
+    element$source_id <- element$source$id
+    element$source_name <- element$source$name
+    element$source <- NULL
+    out <- rbind(out, element)
+  }
+  out
+}
+```
+
+Get the data
+
+```{r, eval=FALSE}
+news_data <- query_news(c("asian", "hate"), from = "2020/4/14", to = "2020/5/13", search_mode='qInTitle')
+```
+
+Now to get the twitter data
+
+```{r get twitter data, eval=FALSE}
+library(rtweet)
+trump_raw <- get_timeline("@realDonaldTrump", n = 3200)
+```
+
+## Data Wrangling
+
+Find types of columns
+```{r, eval=FALSE}
+list_cols <- names(trump_raw)[vapply(trump_raw, typeof, character(1)) == 'list']
+list_cols
+```
+
+Fix hashtags columns so it's no longer a list
+```{r, eval=FALSE}
+combine_vecs <- function(list_of_char_vecs) {
+  vapply(list_of_char_vecs, function(element) {
+    if (length(element) > 1) {
+      paste(element, collapse = ", ")
+    } else {
+      element
+    }
+  }, character(1))
+}
+
+for (col_name in list_cols) {
+  trump_raw[[col_name]] <- combine_vecs(trump_raw[[col_name]])
+}
+```
+
+Cast the cleaned data to dataframe
+```{r, eval=FALSE}
+trump <- as.data.frame(trump_raw)
+```
+
+
+Save
+```{r, eval=FALSE}
+write.csv(trump, file = "trump_twitter_5_13_2020.csv")
+save(trump, file = "trump_twitter_5_13_2020.RData")
+```
+ 
+ 
+Repeat for non-retweet dataset
+
+```{r, eval=FALSE}
+trump_raw <- get_timeline("@realDonaldTrump", n = 3200, include_rts = FALSE)
+list_cols <- names(trump_raw)[vapply(trump_raw, typeof, character(1)) == 'list']
+for (col_name in list_cols) {
+  trump_raw[[col_name]] <- combine_vecs(trump_raw[[col_name]])
+}
+trump_no_rt <- as.data.frame(trump_raw)
+write.csv(trump_no_rt, file = "trump_twitter_no_rt_5_13_2020.csv")
+save(trump_no_rt, file = "trump_twitter_no_rt_5_13_2020.RData")
+```
+
+
+## Data Exploration
+
+Load the files created before
+```{r}
+load("trump_twitter_5_13_2020.RData")
+load("trump_twitter_no_rt_5_13_2020.RData")
+load("news_search_5_13_2020.Rdata")
+```
+
+
+Manipulate the data
+
+```{r, eval=FALSE}
+publish_dates <- news_data$publishedAt %>%
+  gsub(pattern = "Z", replacement = "") %>%
+  strsplit("T") %>%
+  as.data.frame() %>%
+  t()
+
+formatted_dates <- chron(
+  dates. = publish_dates[, 1],
+  times. = publish_dates[, 2],
+  format = c("y-m-d", "h:m:s")
+)
+
+news_data$publish_date <- formatted_dates
+
+barplot(table(days(news_data$publish_date)))
+```
+
+```{r}
+with(trump, barplot(table(days(created_at[grepl(pattern = "china", text)]))))
+```
+```{r}
+library(ggplot2)
+ggplot(trump, aes(x = created_at)) + geom_bar(stat = "bin")
+ggplot(trump[grepl(pattern = "china", trump$text, ignore.case = TRUE), ], aes(x =                                                   created_at)) + geom_line(stat = "bin")
+```
+
+
+Summary code
+```{r}
+sum(grepl(pattern = "china", trump$text, ignore.case = TRUE))
+sum(grepl(pattern = "china", trump_no_rt$text, ignore.case = TRUE))
+```
